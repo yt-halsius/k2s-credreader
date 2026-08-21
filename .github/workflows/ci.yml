@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout K2S
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build and run host-side tests
         run: make -C tests test
@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout K2S
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Clone pinned Momentum
         run: |
@@ -56,7 +56,7 @@ jobs:
           ./fbt build APPSRC=applications_user/k2s_credential_reader
 
       - name: Upload FAP
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: k2s-credential-reader-fap
           path: momentum/build/f7-firmware-C/.extapps/k2s_credential_reader.fap
