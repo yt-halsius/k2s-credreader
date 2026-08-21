@@ -57,7 +57,7 @@ bool rco_leb_decode_factory(
 }
 
 bool rco_leb_decode_34bit(
-    const char bits[RCO_LEB_BITS + 1],
+    const char* bits,
     uint8_t channel,
     RcoLebCredential* out) {
     if(!bits || !out || strlen(bits) != RCO_LEB_BITS) return false;

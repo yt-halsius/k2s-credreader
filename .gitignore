@@ -1,0 +1,15 @@
+# Host-side test output
+tests/test_rco_leb
+
+# Local build/output
+build/
+dist/
+*.fap
+*.elf
+*.map
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*~

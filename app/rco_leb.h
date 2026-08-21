@@ -14,7 +14,7 @@ typedef struct {
 } RcoLebCredential;
 
 bool rco_leb_decode_34bit(
-    const char bits[RCO_LEB_BITS + 1],
+    const char* bits,
     uint8_t channel,
     RcoLebCredential* out);
 

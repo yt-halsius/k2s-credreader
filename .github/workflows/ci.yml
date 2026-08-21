@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Momentum dev HEAD used when this workflow was created.
+  # Keep this pinned; update deliberately after testing a newer Momentum revision.
+  MOMENTUM_REF: 8ed809f
+  MOMENTUM_REPO: https://github.com/Next-Flip/Momentum-Firmware.git
+
+jobs:
+  unit-tests:
+    name: RCO regression tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout K2S
+        uses: actions/checkout@v4
+
+      - name: Build and run host-side tests
+        run: make -C tests test
+
+  momentum-build:
+    name: Build Momentum FAP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout K2S
+        uses: actions/checkout@v4
+
+      - name: Clone pinned Momentum
+        run: |
+          set -euo pipefail
+          git clone --recursive "$MOMENTUM_REPO" momentum
+          cd momentum
+          git checkout "$MOMENTUM_REF"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: Install K2S app
+        run: |
+          set -euo pipefail
+          mkdir -p momentum/applications_user/k2s_credential_reader
+          cp -a app/. momentum/applications_user/k2s_credential_reader/
+
+      - name: Build FAP
+        working-directory: momentum
+        run: |
+          set -euo pipefail
+          ./fbt build APPSRC=applications_user/k2s_credential_reader
+
+      - name: Upload FAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: k2s-credential-reader-fap
+          path: momentum/build/f7-firmware-C/.extapps/k2s_credential_reader.fap
+          if-no-files-found: error
