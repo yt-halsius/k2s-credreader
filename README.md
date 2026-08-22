@@ -63,3 +63,37 @@ If `APPCHK` is clean, launch and test the Aptus transmitter.
 
 Press OK for debug view. A successful native KeeLoq decode should increment
 the `KLQ` count and show the extracted fixed32.
+
+
+## v0.5.5 - Morse acknowledgement
+
+One audible acknowledgement is emitted for each accepted credential event:
+
+- RCO: R = .-.
+- Aptus: A = .-
+- MIFARE: M = -- (reserved)
+- EM: E = . (reserved)
+
+Timing is 100 ms per dot/unit and 300 ms per dash. Duplicate RF frames for the
+same credential are suppressed for 1000 ms, so one physical button press should
+produce one Morse letter.
+
+The feedback code is isolated in `credential_feedback.c/.h`; protocol decoders
+remain unaware of the buzzer.
+
+
+## v0.5.6 - Faster, higher-pitched Morse feedback
+
+Credential feedback tuning:
+
+- Tone: 1000 Hz
+- Dot: 40 ms
+- Dash: 120 ms
+- Intra-character gap: 40 ms
+- Same-credential suppression: 2500 ms
+
+This keeps the standard 1:3 Morse element ratio while making R (`.-.`) and
+A (`.-`) behave like short acknowledgement sounds rather than slow telegrams.
+
+The feedback still goes through Flipper's Notification service. Custom
+NotificationMessage objects are used only to get exact timing and frequency.

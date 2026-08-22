@@ -5,6 +5,7 @@
 
 #include "aptus.h"
 #include "credential.h"
+#include "credential_feedback.h"
 #include "rco_leb.h"
 #include "subghz_reader.h"
 
@@ -24,6 +25,7 @@ typedef struct {
 
     bool have_credential;
     Credential credential;
+    CredentialFeedback* feedback;
 
     uint32_t rco_factory_code;
     uint8_t rco_function_code;
@@ -75,6 +77,9 @@ static void k2s_update(K2sReaderApp* app) {
                 CredentialTypeRcoRadio,
                 rco.rco_id,
                 channel);
+            if(app->have_credential) {
+                credential_feedback_emit(app->feedback, &app->credential);
+            }
         }
         break;
     }
@@ -85,6 +90,9 @@ static void k2s_update(K2sReaderApp* app) {
         app->aptus_fixed32 = app->radio.fixed32;
         app->have_credential =
             aptus_decode_fixed32(app->radio.fixed32, &app->credential);
+        if(app->have_credential) {
+            credential_feedback_emit(app->feedback, &app->credential);
+        }
         break;
 
     case SubGhzReaderProtocolNone:
@@ -215,6 +223,7 @@ int32_t k2s_credential_reader_app(void* p) {
     memset(app, 0, sizeof(K2sReaderApp));
     credential_clear(&app->credential);
     app->radio.rssi = -127.0f;
+    app->feedback = credential_feedback_alloc();
 
     app->decoder_self_test_ok = k2s_decoder_self_test();
 
@@ -265,6 +274,11 @@ int32_t k2s_credential_reader_app(void* p) {
 
     view_port_free(app->view_port);
     furi_message_queue_free(app->input_queue);
+
+    if(app->feedback) {
+        credential_feedback_free(app->feedback);
+        app->feedback = NULL;
+    }
 
     memset(app, 0, sizeof(K2sReaderApp));
     free(app);

@@ -3,10 +3,10 @@ App(
     name="K2S Credential Reader",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="k2s_credential_reader_app",
-    requires=["gui"],
+    requires=["gui", "notification"],
     stack_size=4 * 1024,
     fap_category="Tools",
     fap_author="K2S",
     fap_description="Read-only credential reader",
-    fap_version="0.5.4",
+    fap_version="0.5.6",
 )
