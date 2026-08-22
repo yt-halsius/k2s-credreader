@@ -1,99 +1,115 @@
-# K2S Aptus RX v0.5.4 — FAP-safe native receiver callback
+# K2S Credential Reader
 
-v0.5.3 reached `APPCHK` but failed because K2S called
-`subghz_protocol_decoder_base_set_decoder_callback()` directly. That symbol
-exists in firmware but is deliberately disabled for external FAPs.
+Flipper Zero / Momentum reader for normalizing several physical access-control
+credential types into one common representation.
 
-Momentum API 87.1 exposes the correct higher-level workaround:
+Current v0.6 functionality:
+
+| Source | Native / decoder path | Normalized output | Audible acknowledgement |
+| --- | --- | --- | --- |
+| RCO/LEB radio | K2S LEB decoder | 9-digit decimal credential | `R` (`.-.`) |
+| Aptus radio | Momentum native KeeLoq + K2S normalization | decimal Aptus credential | `A` (`.-`) |
+| EM4100 | Momentum native LF RFID decoder | 12 uppercase hex characters | `E` (`.`) |
+| MIFARE / ISO14443-A | Momentum native NFC poller, 4-byte UID | `00` + 8 uppercase hex characters | `M` (`--`) |
+
+## Contactless mode
+
+Contactless mode is the default.
+
+K2S intentionally does not keep LF, NFC and Sub-GHz active at the same time.
+The reader alternates between:
 
 ```text
-subghz_receiver_set_rx_callback()
+EM / LF       1200 ms
+MIFARE / NFC   500 ms
 ```
 
-That function is exported to FAPs. Inside firmware, `SubGhzReceiver` performs
-the private callback hookup for every registered decoder and forwards a
-successfully decoded frame to the application-level receiver callback.
+EM gets the first scan window. If a valid EM credential is found, K2S switches
+to NFC immediately instead of waiting for the rest of the EM window.
 
-So v0.5.4 uses:
+The same credential is suppressed while it remains present. A changed
+credential is accepted immediately, while repeated missed scan windows re-arm
+the corresponding reader.
+
+Examples:
 
 ```text
-CC1101
-  ↓
-SubGhzWorker
-  ↓
-K2S pair dispatcher
-  ├── K2S RCO/LEB decoder
-  │
-  └── SubGhzReceiver
-         ↓
-     protocol registry
-         ↓
-    native KeeLoq
-         ↓
-subghz_receiver_set_rx_callback()
-         ↓
-  protocol == KeeLoq?
-         ↓
- serialize transiently in RAM
-         ↓
-      fixed32
-         ↓
-  Aptus normalization
+EM payload:      12 34 56 78 9A
+K2S credential:  00123456789A
+
+MIFARE UID:      12 34 56 78
+K2S credential:  0012345678
 ```
 
-The FAP no longer calls the disabled per-decoder callback API.
+Only 4-byte ISO14443-A UIDs are accepted in v0.6. Longer UIDs are intentionally
+left for a later version.
+
+## Radio mode
+
+Press **Left** to temporarily switch from contactless mode to Sub-GHz radio
+mode. Contactless readers are fully torn down before the CC1101 receiver is
+started.
+
+Radio mode supports RCO/LEB and Aptus. Press **Left** again to stop Sub-GHz and
+return to contactless mode, beginning with EM scanning.
+
+Press **OK** to toggle the debug view and **Back** to exit.
 
 ## Reader, not recorder
 
-No `.sub` file is created, no storage object is opened, and there is no TX
-path. Momentum's native decoder necessarily reconstructs the current 64-bit
-frame transiently. K2S immediately extracts only `fixed32`, wipes the temporary
-8-byte key buffer, frees the in-memory `FlipperFormat`, and allocates a clean
-one for the next frame.
+K2S is deliberately a reader, not a recorder or transmitter.
 
-## Test
+It does not persist raw RF frames, rolling-code material, counters, NFC card
+contents, sectors, keys or replay-capable captures. Protocol-specific transient
+data is kept only as long as necessary to derive the normalized credential.
 
-Build:
+## Morse acknowledgement
+
+Successful credentials generate short 1 kHz Morse acknowledgements:
+
+```text
+RCO      R  .-.
+Aptus    A  .-
+MIFARE   M  --
+EM       E  .
+```
+
+Dot timing is 40 ms, dash timing 120 ms and the intra-character gap is 40 ms.
+
+## Build against Momentum
+
+Copy `app/` into the Momentum tree as:
+
+```text
+applications_user/k2s_credential_reader_flipper/
+```
+
+Then build:
 
 ```bash
 ./fbt build APPSRC=applications_user/k2s_credential_reader_flipper
 ```
 
-If `APPCHK` is clean, launch and test the Aptus transmitter.
+or launch directly:
 
-Press OK for debug view. A successful native KeeLoq decode should increment
-the `KLQ` count and show the extracted fixed32.
+```bash
+./fbt launch APPSRC=applications_user/k2s_credential_reader_flipper
+```
 
+## Tests
 
-## v0.5.5 - Morse acknowledgement
+Host-side regression tests cover:
 
-One audible acknowledgement is emitted for each accepted credential event:
+- RCO credential conversion and known 34-bit vectors
+- Aptus fixed32 -> credential conversion
+- EM4100 formatting
+- 4-byte MIFARE UID formatting
+- invalid contactless input lengths
 
-- RCO: R = .-.
-- Aptus: A = .-
-- MIFARE: M = -- (reserved)
-- EM: E = . (reserved)
+Run locally with:
 
-Timing is 100 ms per dot/unit and 300 ms per dash. Duplicate RF frames for the
-same credential are suppressed for 1000 ms, so one physical button press should
-produce one Morse letter.
+```bash
+make -C tests test
+```
 
-The feedback code is isolated in `credential_feedback.c/.h`; protocol decoders
-remain unaware of the buzzer.
-
-
-## v0.5.6 - Faster, higher-pitched Morse feedback
-
-Credential feedback tuning:
-
-- Tone: 1000 Hz
-- Dot: 40 ms
-- Dash: 120 ms
-- Intra-character gap: 40 ms
-- Same-credential suppression: 2500 ms
-
-This keeps the standard 1:3 Morse element ratio while making R (`.-.`) and
-A (`.-`) behave like short acknowledgement sounds rather than slow telegrams.
-
-The feedback still goes through Flipper's Notification service. Custom
-NotificationMessage objects are used only to get exact timing and frequency.
+CI also builds the FAP against a deliberately pinned Momentum revision.

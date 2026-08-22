@@ -4,94 +4,352 @@
 #include <input/input.h>
 
 #include "aptus.h"
+#include "contactless.h"
 #include "credential.h"
 #include "credential_feedback.h"
+#include "lf_reader.h"
+#include "nfc_reader.h"
 #include "rco_leb.h"
 #include "subghz_reader.h"
 
-#define UI_REFRESH_MS 100U
+#include <stdlib.h>
+#include <string.h>
+
+#define UI_REFRESH_MS 50U
+
+/* Contactless scan timing. */
+#define EM_SCAN_WINDOW_MS 1200U
+#define MIFARE_SCAN_WINDOW_MS 500U
+#define RELEASE_MISS_WINDOWS 2U
+
+typedef enum {
+    K2sModeContactless = 0,
+    K2sModeRadio,
+} K2sMode;
+
+typedef enum {
+    ContactlessStateScanEm = 0,
+    ContactlessStateScanMifare,
+} ContactlessState;
 
 typedef struct {
     FuriMessageQueue* input_queue;
     ViewPort* view_port;
     Gui* gui;
 
-    SubGhzReader* subghz;
-    bool decoder_self_test_ok;
-    bool rx_start_ok;
-
-    SubGhzReaderStatus radio;
-    uint32_t last_sequence;
-
-    bool have_credential;
-    Credential credential;
     CredentialFeedback* feedback;
 
-    uint32_t rco_factory_code;
-    uint8_t rco_function_code;
-    uint32_t aptus_fixed32;
+    K2sMode mode;
+    ContactlessState contactless_state;
+    uint32_t state_started_tick;
+    bool state_saw_credential;
 
-    bool debug_view;
-} K2sReaderApp;
+    LfReader* lf;
+    NfcReader* nfc;
+    SubGhzReader* subghz;
 
-static bool k2s_decoder_self_test(void) {
-    RcoLebCredential rco = {0};
-    Credential aptus = {0};
+    bool lf_ok;
+    bool nfc_ok;
+    bool radio_ok;
 
-    const bool rco_ok =
-        rco_leb_decode_34bit(
-            "1111111000010010001101000101011000", 1U, &rco) &&
-        strcmp(rco.rco_id, "005222016") == 0;
+    LfReaderStatus lf_status;
+    NfcReaderStatus nfc_status;
+    SubGhzReaderStatus radio_status;
 
-    const bool aptus_ok =
-        aptus_decode_fixed32(0xE6A2C484U, &aptus) &&
-        strcmp(aptus.value, "38177487") == 0 &&
-        aptus.button == 1U;
+    uint32_t last_lf_sequence;
+    uint32_t last_nfc_sequence;
+    uint32_t last_radio_sequence;
 
-    return rco_ok && aptus_ok;
+    Credential em;
+    Credential mifare;
+    Credential radio_credential;
+
+    bool have_em;
+    bool have_mifare;
+    bool have_radio;
+
+    uint8_t em_miss_windows;
+    uint8_t mifare_miss_windows;
+
+    bool debug;
+} K2sApp;
+
+static bool credential_same(const Credential* a, const Credential* b) {
+    if(!a || !b) return false;
+    return a->type == b->type &&
+           a->button == b->button &&
+           strcmp(a->value, b->value) == 0;
 }
 
-static void k2s_update(K2sReaderApp* app) {
-    if(!app->subghz) return;
+static void stop_lf(K2sApp* app) {
+    if(app->lf) {
+        lf_reader_free(app->lf);
+        app->lf = NULL;
+    }
+    app->lf_ok = false;
+    app->last_lf_sequence = 0;
+    memset(&app->lf_status, 0, sizeof(app->lf_status));
+}
 
-    subghz_reader_get_status(app->subghz, &app->radio);
+static void stop_nfc(K2sApp* app) {
+    if(app->nfc) {
+        nfc_reader_free(app->nfc);
+        app->nfc = NULL;
+    }
+    app->nfc_ok = false;
+    app->last_nfc_sequence = 0;
+    memset(&app->nfc_status, 0, sizeof(app->nfc_status));
+}
 
-    if(app->radio.sequence == 0U || app->radio.sequence == app->last_sequence) {
+static void stop_contactless(K2sApp* app) {
+    stop_lf(app);
+    stop_nfc(app);
+}
+
+static void stop_radio(K2sApp* app) {
+    if(app->subghz) {
+        subghz_reader_free(app->subghz);
+        app->subghz = NULL;
+    }
+    app->radio_ok = false;
+    app->last_radio_sequence = 0;
+    memset(&app->radio_status, 0, sizeof(app->radio_status));
+    app->radio_status.rssi = -127.0f;
+}
+
+static bool start_em_scan(K2sApp* app) {
+    stop_nfc(app);
+    stop_lf(app);
+
+    app->lf = lf_reader_alloc();
+    if(!app->lf) {
+        app->lf_ok = false;
+        return false;
+    }
+
+    app->lf_ok = lf_reader_start(app->lf);
+    if(!app->lf_ok) {
+        lf_reader_free(app->lf);
+        app->lf = NULL;
+        return false;
+    }
+
+    app->contactless_state = ContactlessStateScanEm;
+    app->state_started_tick = furi_get_tick();
+    app->state_saw_credential = false;
+    app->last_lf_sequence = 0;
+    return true;
+}
+
+static bool start_mifare_scan(K2sApp* app) {
+    stop_lf(app);
+    stop_nfc(app);
+
+    app->nfc = nfc_reader_alloc();
+    if(!app->nfc) {
+        app->nfc_ok = false;
+        return false;
+    }
+
+    app->nfc_ok = nfc_reader_start(app->nfc);
+    if(!app->nfc_ok) {
+        nfc_reader_free(app->nfc);
+        app->nfc = NULL;
+        return false;
+    }
+
+    app->contactless_state = ContactlessStateScanMifare;
+    app->state_started_tick = furi_get_tick();
+    app->state_saw_credential = false;
+    app->last_nfc_sequence = 0;
+    return true;
+}
+
+static bool start_contactless(K2sApp* app) {
+    stop_radio(app);
+    stop_contactless(app);
+
+    app->mode = K2sModeContactless;
+    app->have_radio = false;
+    credential_clear(&app->radio_credential);
+
+    /* EM always gets the first scan window. */
+    return start_em_scan(app);
+}
+
+static bool start_radio(K2sApp* app) {
+    stop_contactless(app);
+    stop_radio(app);
+
+    app->mode = K2sModeRadio;
+    app->subghz = subghz_reader_alloc();
+    if(!app->subghz) {
+        app->radio_ok = false;
+        return false;
+    }
+
+    app->radio_ok = subghz_reader_start(app->subghz);
+    if(!app->radio_ok) {
+        subghz_reader_free(app->subghz);
+        app->subghz = NULL;
+        return false;
+    }
+
+    return true;
+}
+
+static void accept_em(K2sApp* app, const Credential* credential) {
+    app->state_saw_credential = true;
+    app->em_miss_windows = 0;
+
+    if(!app->have_em || !credential_same(&app->em, credential)) {
+        app->em = *credential;
+        app->have_em = true;
+
+        /*
+         * A new EM begins a new contactless set. A MIFARE already cached from
+         * the previous set must be encountered again in the next NFC window.
+         */
+        app->have_mifare = false;
+        credential_clear(&app->mifare);
+        app->mifare_miss_windows = 0;
+
+        credential_feedback_emit(app->feedback, &app->em);
+    }
+}
+
+static void accept_mifare(K2sApp* app, const Credential* credential) {
+    app->state_saw_credential = true;
+    app->mifare_miss_windows = 0;
+
+    if(!app->have_mifare || !credential_same(&app->mifare, credential)) {
+        app->mifare = *credential;
+        app->have_mifare = true;
+        credential_feedback_emit(app->feedback, &app->mifare);
+    }
+}
+
+static void update_em_scan(K2sApp* app) {
+    if(!app->lf_ok || !app->lf) return;
+
+    lf_reader_get_status(app->lf, &app->lf_status);
+
+    if(app->lf_status.sequence != 0 &&
+       app->lf_status.sequence != app->last_lf_sequence) {
+        app->last_lf_sequence = app->lf_status.sequence;
+
+        Credential credential = {0};
+        if(app->lf_status.data_len == K2S_EM4100_DATA_LEN &&
+           contactless_decode_em4100(app->lf_status.data, &credential)) {
+            accept_em(app, &credential);
+
+            /*
+             * EM has priority. Once a valid EM credential is obtained there is
+             * no reason to keep the LF field up for the remainder of the
+             * window: tear it down and immediately give NFC its chance.
+             *
+             * This is also important for hardware bring-up. The native LF
+             * worker needs appreciably more settling/decoding time than the
+             * NFC poller, so short symmetric windows can starve EM while NFC
+             * continues to work.
+             */
+            start_mifare_scan(app);
+            return;
+        }
+    }
+
+    if(furi_get_tick() - app->state_started_tick >=
+       furi_ms_to_ticks(EM_SCAN_WINDOW_MS)) {
+
+        if(!app->state_saw_credential && app->have_em) {
+            if(app->em_miss_windows < UINT8_MAX) app->em_miss_windows++;
+            if(app->em_miss_windows >= RELEASE_MISS_WINDOWS) {
+                app->have_em = false;
+                credential_clear(&app->em);
+                app->em_miss_windows = 0;
+            }
+        }
+
+        start_mifare_scan(app);
+    }
+}
+
+static void update_mifare_scan(K2sApp* app) {
+    if(!app->nfc_ok || !app->nfc) return;
+
+    nfc_reader_get_status(app->nfc, &app->nfc_status);
+
+    if(app->nfc_status.sequence != 0 &&
+       app->nfc_status.sequence != app->last_nfc_sequence) {
+        app->last_nfc_sequence = app->nfc_status.sequence;
+
+        Credential credential = {0};
+        if(contactless_decode_mifare_uid(
+               app->nfc_status.uid,
+               app->nfc_status.uid_len,
+               &credential)) {
+            accept_mifare(app, &credential);
+        }
+    }
+
+    if(furi_get_tick() - app->state_started_tick >=
+       furi_ms_to_ticks(MIFARE_SCAN_WINDOW_MS)) {
+
+        if(!app->state_saw_credential && app->have_mifare) {
+            if(app->mifare_miss_windows < UINT8_MAX) app->mifare_miss_windows++;
+            if(app->mifare_miss_windows >= RELEASE_MISS_WINDOWS) {
+                app->have_mifare = false;
+                credential_clear(&app->mifare);
+                app->mifare_miss_windows = 0;
+            }
+        }
+
+        start_em_scan(app);
+    }
+}
+
+static void update_radio(K2sApp* app) {
+    if(!app->radio_ok || !app->subghz) return;
+
+    subghz_reader_get_status(app->subghz, &app->radio_status);
+
+    if(app->radio_status.sequence == 0 ||
+       app->radio_status.sequence == app->last_radio_sequence) {
         return;
     }
 
-    app->last_sequence = app->radio.sequence;
+    app->last_radio_sequence = app->radio_status.sequence;
 
-    switch(app->radio.protocol) {
+    Credential credential = {0};
+
+    switch(app->radio_status.protocol) {
     case SubGhzReaderProtocolRcoLeb: {
-        const uint8_t channel = app->radio.function_code + 1U;
+        const uint8_t channel = app->radio_status.function_code + 1U;
         RcoLebCredential rco = {0};
 
-        if(rco_leb_decode_factory(app->radio.factory_code, channel, &rco)) {
-            app->rco_factory_code = rco.factory_code;
-            app->rco_function_code = app->radio.function_code;
-            app->aptus_fixed32 = 0U;
+        if(rco_leb_decode_factory(app->radio_status.factory_code, channel, &rco) &&
+           credential_set(
+               &credential,
+               CredentialTypeRcoRadio,
+               rco.rco_id,
+               channel)) {
 
-            app->have_credential = credential_set(
-                &app->credential,
-                CredentialTypeRcoRadio,
-                rco.rco_id,
-                channel);
-            if(app->have_credential) {
-                credential_feedback_emit(app->feedback, &app->credential);
+            if(!app->have_radio || !credential_same(&app->radio_credential, &credential)) {
+                app->radio_credential = credential;
+                app->have_radio = true;
+                credential_feedback_emit(app->feedback, &app->radio_credential);
             }
         }
         break;
     }
 
     case SubGhzReaderProtocolAptusKeeLoq:
-        app->rco_factory_code = 0U;
-        app->rco_function_code = 0U;
-        app->aptus_fixed32 = app->radio.fixed32;
-        app->have_credential =
-            aptus_decode_fixed32(app->radio.fixed32, &app->credential);
-        if(app->have_credential) {
-            credential_feedback_emit(app->feedback, &app->credential);
+        if(aptus_decode_fixed32(app->radio_status.fixed32, &credential)) {
+            if(!app->have_radio || !credential_same(&app->radio_credential, &credential)) {
+                app->radio_credential = credential;
+                app->have_radio = true;
+                credential_feedback_emit(app->feedback, &app->radio_credential);
+            }
         }
         break;
 
@@ -101,147 +359,163 @@ static void k2s_update(K2sReaderApp* app) {
     }
 }
 
-static void k2s_draw_normal(Canvas* canvas, K2sReaderApp* app) {
-    canvas_set_font(canvas, FontPrimary);
+static void draw_contactless(Canvas* canvas, K2sApp* app) {
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 2, 20, "CONTACTLESS   LEFT: Radio");
 
-    if(!app->have_credential) {
-        canvas_draw_str(canvas, 2, 25, "Listening...");
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 41, "RCO + Aptus 433.92 MHz");
-        canvas_draw_str(canvas, 2, 58, "Read-only");
+    if(!app->lf_ok && app->contactless_state == ContactlessStateScanEm) {
+        canvas_draw_str(canvas, 2, 37, "EM reader start FAILED");
         return;
     }
 
-    canvas_draw_str(canvas, 2, 25, credential_type_name(app->credential.type));
+    if(!app->nfc_ok && app->contactless_state == ContactlessStateScanMifare) {
+        canvas_draw_str(canvas, 2, 37, "NFC reader start FAILED");
+        return;
+    }
 
-    canvas_set_font(canvas, FontBigNumbers);
-    canvas_draw_str(canvas, 2, 49, app->credential.value);
+    if(app->have_em && app->have_mifare) {
+        canvas_draw_str(canvas, 2, 33, "EM");
+        canvas_draw_str(canvas, 20, 33, app->em.value);
+        canvas_draw_str(canvas, 2, 49, "MF");
+        canvas_draw_str(canvas, 20, 49, app->mifare.value);
+    } else if(app->have_em) {
+        canvas_draw_str(canvas, 2, 34, "EM");
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 50, app->em.value);
+    } else if(app->have_mifare) {
+        canvas_draw_str(canvas, 2, 34, "MIFARE");
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 50, app->mifare.value);
+    } else {
+        canvas_draw_str(
+            canvas,
+            2,
+            39,
+            app->contactless_state == ContactlessStateScanEm ?
+                "Scanning EM..." :
+                "Scanning MIFARE...");
+    }
 
     canvas_set_font(canvas, FontSecondary);
-    char line[32];
-    snprintf(line, sizeof(line), "Button %u", app->credential.button);
-    canvas_draw_str(canvas, 2, 62, line);
+    canvas_draw_str(
+        canvas,
+        2,
+        63,
+        app->contactless_state == ContactlessStateScanEm ?
+            "EM window 1.2s" :
+            "MIFARE window 0.5s");
 }
 
-static void k2s_draw_debug(Canvas* canvas, K2sReaderApp* app) {
+static void draw_radio(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 2, 20, "RADIO         LEFT: Contactless");
 
-    char line[32];
+    if(!app->radio_ok) {
+        canvas_draw_str(canvas, 2, 39, "CC1101 RX start FAILED");
+        return;
+    }
 
+    if(!app->have_radio) {
+        canvas_draw_str(canvas, 2, 39, "Listening RCO / Aptus...");
+        return;
+    }
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 37, credential_type_name(app->radio_credential.type));
+    canvas_set_font(canvas, FontBigNumbers);
+    canvas_draw_str(canvas, 2, 57, app->radio_credential.value);
+}
+
+static void draw_debug(Canvas* canvas, K2sApp* app) {
+    char line[40];
+
+    canvas_set_font(canvas, FontSecondary);
     snprintf(
         line,
         sizeof(line),
-        "RSSI %.0f dBm Valid %lu",
-        (double)app->radio.rssi,
-        (unsigned long)app->radio.valid_frames);
+        "Mode:%s",
+        app->mode == K2sModeRadio ? "RADIO" : "CONTACTLESS");
     canvas_draw_str(canvas, 2, 22, line);
 
-    if(!app->have_credential) {
+    if(app->mode == K2sModeRadio) {
         snprintf(
             line,
             sizeof(line),
-            "Native KeeLoq: %lu",
-            (unsigned long)app->radio.native_keeloq_frames);
-        canvas_draw_str(canvas, 2, 39, line);
-        canvas_draw_str(canvas, 2, 56, "Waiting for protocol...");
-        return;
+            "RSSI %.0f  V:%lu",
+            (double)app->radio_status.rssi,
+            (unsigned long)app->radio_status.valid_frames);
+        canvas_draw_str(canvas, 2, 38, line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "KeeLoq:%lu",
+            (unsigned long)app->radio_status.native_keeloq_frames);
+        canvas_draw_str(canvas, 2, 53, line);
+    } else {
+        snprintf(
+            line,
+            sizeof(line),
+            "State:%s",
+            app->contactless_state == ContactlessStateScanEm ? "EM" : "MIFARE");
+        canvas_draw_str(canvas, 2, 38, line);
+
+        snprintf(
+            line,
+            sizeof(line),
+            "EM:%s MF:%s",
+            app->have_em ? "yes" : "no",
+            app->have_mifare ? "yes" : "no");
+        canvas_draw_str(canvas, 2, 53, line);
     }
 
-    if(app->credential.type == CredentialTypeRcoRadio) {
-        snprintf(
-            line,
-            sizeof(line),
-            "RCO Factory %06lX",
-            (unsigned long)app->rco_factory_code);
-        canvas_draw_str(canvas, 2, 34, line);
-
-        snprintf(
-            line,
-            sizeof(line),
-            "fn=%u -> Button %u",
-            app->rco_function_code,
-            app->credential.button);
-        canvas_draw_str(canvas, 2, 46, line);
-    } else if(app->credential.type == CredentialTypeAptusRadio) {
-        snprintf(
-            line,
-            sizeof(line),
-            "Aptus fixed %08lX",
-            (unsigned long)app->aptus_fixed32);
-        canvas_draw_str(canvas, 2, 34, line);
-
-        snprintf(
-            line,
-            sizeof(line),
-            "Button %u  KLQ %lu",
-            app->credential.button,
-            (unsigned long)app->radio.native_keeloq_frames);
-        canvas_draw_str(canvas, 2, 46, line);
-    }
-
-    canvas_draw_str(canvas, 2, 58, "ID");
-    canvas_draw_str(canvas, 15, 58, app->credential.value);
+    canvas_draw_str(canvas, 2, 64, "OK normal  LEFT mode");
 }
 
-static void k2s_draw_callback(Canvas* canvas, void* context) {
-    K2sReaderApp* app = context;
+static void draw_cb(Canvas* canvas, void* context) {
+    K2sApp* app = context;
 
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, "K2S Credential Reader");
+    canvas_draw_str(canvas, 2, 11, "K2S Credential Reader");
 
-    if(!app->decoder_self_test_ok) {
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 32, "Decoder self-test FAILED");
-        return;
-    }
-
-    if(!app->rx_start_ok) {
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 32, "CC1101 RX start FAILED");
-        return;
-    }
-
-    if(app->debug_view) {
-        k2s_draw_debug(canvas, app);
+    if(app->debug) {
+        draw_debug(canvas, app);
+    } else if(app->mode == K2sModeRadio) {
+        draw_radio(canvas, app);
     } else {
-        k2s_draw_normal(canvas, app);
+        draw_contactless(canvas, app);
     }
 }
 
-static void k2s_input_callback(InputEvent* input_event, void* context) {
-    K2sReaderApp* app = context;
-    furi_message_queue_put(app->input_queue, input_event, 0);
+static void input_cb(InputEvent* event, void* context) {
+    K2sApp* app = context;
+    furi_message_queue_put(app->input_queue, event, 0);
 }
 
 int32_t k2s_credential_reader_app(void* p) {
     UNUSED(p);
 
-    K2sReaderApp* app = malloc(sizeof(K2sReaderApp));
+    K2sApp* app = malloc(sizeof(K2sApp));
     if(!app) return -1;
 
-    memset(app, 0, sizeof(K2sReaderApp));
-    credential_clear(&app->credential);
-    app->radio.rssi = -127.0f;
-    app->feedback = credential_feedback_alloc();
+    memset(app, 0, sizeof(K2sApp));
+    credential_clear(&app->em);
+    credential_clear(&app->mifare);
+    credential_clear(&app->radio_credential);
+    app->radio_status.rssi = -127.0f;
 
-    app->decoder_self_test_ok = k2s_decoder_self_test();
+    app->feedback = credential_feedback_alloc();
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();
-
-    view_port_draw_callback_set(app->view_port, k2s_draw_callback, app);
-    view_port_input_callback_set(app->view_port, k2s_input_callback, app);
+    view_port_draw_callback_set(app->view_port, draw_cb, app);
+    view_port_input_callback_set(app->view_port, input_cb, app);
 
     app->gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
 
-    if(app->decoder_self_test_ok) {
-        app->subghz = subghz_reader_alloc();
-        if(app->subghz) {
-            app->rx_start_ok = subghz_reader_start(app->subghz);
-        }
-    }
+    start_contactless(app);
 
     bool running = true;
     InputEvent event;
@@ -255,19 +529,30 @@ int32_t k2s_credential_reader_app(void* p) {
                 if(event.key == InputKeyBack) {
                     running = false;
                 } else if(event.key == InputKeyOk) {
-                    app->debug_view = !app->debug_view;
+                    app->debug = !app->debug;
+                } else if(event.key == InputKeyLeft) {
+                    if(app->mode == K2sModeRadio) {
+                        start_contactless(app);
+                    } else {
+                        start_radio(app);
+                    }
                 }
             }
         }
 
-        k2s_update(app);
+        if(app->mode == K2sModeRadio) {
+            update_radio(app);
+        } else if(app->contactless_state == ContactlessStateScanEm) {
+            update_em_scan(app);
+        } else {
+            update_mifare_scan(app);
+        }
+
         view_port_update(app->view_port);
     }
 
-    if(app->subghz) {
-        subghz_reader_free(app->subghz);
-        app->subghz = NULL;
-    }
+    stop_contactless(app);
+    stop_radio(app);
 
     gui_remove_view_port(app->gui, app->view_port);
     furi_record_close(RECORD_GUI);
@@ -277,11 +562,9 @@ int32_t k2s_credential_reader_app(void* p) {
 
     if(app->feedback) {
         credential_feedback_free(app->feedback);
-        app->feedback = NULL;
     }
 
-    memset(app, 0, sizeof(K2sReaderApp));
+    memset(app, 0, sizeof(K2sApp));
     free(app);
-
     return 0;
 }
