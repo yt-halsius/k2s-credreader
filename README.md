@@ -123,3 +123,27 @@ CI also builds the FAP against a deliberately pinned Momentum revision.
   This matters especially in contactless mode where EM (`E`) can be followed
   immediately by MIFARE (`M`); without a character gap the two acknowledgements
   can perceptually run together even though the element timing is correct.
+
+
+## v0.7 HID keyboard output
+
+USB HID keyboard emulation is enabled by default at application startup.
+
+Each newly accepted credential event is typed as the already-normalized
+credential value followed by Enter:
+
+```text
+RCO      005222016<ENTER>
+Aptus    38177487<ENTER>
+EM       00123456789A<ENTER>
+MIFARE   0012345678<ENTER>
+```
+
+The same duplicate/event suppression used for display and Morse sits before HID,
+so repeated RF frames or repeated contactless polls do not generate extra rows.
+
+Press **Right** to toggle HID. The native-style bottom-right flag shows
+`HID ON` or `HID OFF`. **Left** retains the Radio/Contact mode toggle.
+
+The app remembers the USB configuration that was active before K2S started.
+Turning HID off, or exiting K2S, restores that previous USB configuration.

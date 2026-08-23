@@ -9,6 +9,7 @@
 #include "credential.h"
 #include "credential_feedback.h"
 #include "lf_reader.h"
+#include "hid_output.h"
 #include "nfc_reader.h"
 #include "rco_leb.h"
 #include "subghz_reader.h"
@@ -39,6 +40,8 @@ typedef struct {
     Gui* gui;
 
     CredentialFeedback* feedback;
+    HidOutput* hid;
+    bool hid_enable_ok;
 
     K2sMode mode;
     ContactlessState contactless_state;
@@ -80,6 +83,16 @@ static bool credential_same(const Credential* a, const Credential* b) {
     return a->type == b->type &&
            a->button == b->button &&
            strcmp(a->value, b->value) == 0;
+}
+
+static void output_credential(K2sApp* app, const Credential* credential) {
+    if(!app || !credential) return;
+
+    credential_feedback_emit(app->feedback, credential);
+
+    if(app->hid && hid_output_is_enabled(app->hid)) {
+        hid_output_send_credential(app->hid, credential);
+    }
 }
 
 static void stop_lf(K2sApp* app) {
@@ -210,7 +223,7 @@ static void accept_em(K2sApp* app, const Credential* credential) {
     if(!app->have_em || !credential_same(&app->em, credential)) {
         app->em = *credential;
         app->have_em = true;
-        credential_feedback_emit(app->feedback, &app->em);
+        output_credential(app, &app->em);
     }
 }
 
@@ -221,7 +234,7 @@ static void accept_mifare(K2sApp* app, const Credential* credential) {
     if(!app->have_mifare || !credential_same(&app->mifare, credential)) {
         app->mifare = *credential;
         app->have_mifare = true;
-        credential_feedback_emit(app->feedback, &app->mifare);
+        output_credential(app, &app->mifare);
     }
 }
 
@@ -341,7 +354,7 @@ static void update_radio(K2sApp* app) {
             if(!app->have_radio || !credential_same(&app->radio_credential, &credential)) {
                 app->radio_credential = credential;
                 app->have_radio = true;
-                credential_feedback_emit(app->feedback, &app->radio_credential);
+                output_credential(app, &app->radio_credential);
             }
         }
         break;
@@ -352,7 +365,7 @@ static void update_radio(K2sApp* app) {
             if(!app->have_radio || !credential_same(&app->radio_credential, &credential)) {
                 app->radio_credential = credential;
                 app->have_radio = true;
-                credential_feedback_emit(app->feedback, &app->radio_credential);
+                output_credential(app, &app->radio_credential);
             }
         }
         break;
@@ -363,10 +376,29 @@ static void update_radio(K2sApp* app) {
     }
 }
 
+static void draw_footer(Canvas* canvas, K2sApp* app) {
+    /*
+     * Reserve the bottom native button-label area exclusively for controls.
+     *
+     * Important: drawing functions above may leave Canvas in FontPrimary or
+     * FontBigNumbers. elements_button_* uses the current Canvas font for its
+     * label, so explicitly restore FontSecondary here before drawing the
+     * native-style footer buttons.
+     */
+    canvas_set_font(canvas, FontSecondary);
+
+    elements_button_left(
+        canvas,
+        app->mode == K2sModeRadio ? "Contact" : "Radio");
+
+    elements_button_right(
+        canvas,
+        (app->hid && hid_output_is_enabled(app->hid)) ? "HID ON" : "HID OFF");
+}
+
 static void draw_contactless(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 20, "CONTACTLESS");
-    elements_button_left(canvas, "Radio");
+    canvas_draw_str(canvas, 2, 18, "CONTACTLESS");
 
     if(!app->lf_ok && app->contactless_state == ContactlessStateScanEm) {
         canvas_draw_str(canvas, 2, 37, "EM reader start FAILED");
@@ -379,57 +411,48 @@ static void draw_contactless(Canvas* canvas, K2sApp* app) {
     }
 
     if(app->have_em && app->have_mifare) {
-        canvas_draw_str(canvas, 2, 33, "EM");
-        canvas_draw_str(canvas, 20, 33, app->em.value);
-        canvas_draw_str(canvas, 2, 49, "MF");
-        canvas_draw_str(canvas, 20, 49, app->mifare.value);
+        canvas_draw_str(canvas, 2, 29, "EM");
+        canvas_draw_str(canvas, 20, 29, app->em.value);
+        canvas_draw_str(canvas, 2, 43, "MF");
+        canvas_draw_str(canvas, 20, 43, app->mifare.value);
     } else if(app->have_em) {
-        canvas_draw_str(canvas, 2, 34, "EM");
+        canvas_draw_str(canvas, 2, 29, "EM");
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 50, app->em.value);
+        canvas_draw_str(canvas, 2, 45, app->em.value);
     } else if(app->have_mifare) {
-        canvas_draw_str(canvas, 2, 34, "MIFARE");
+        canvas_draw_str(canvas, 2, 29, "MIFARE");
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 50, app->mifare.value);
+        canvas_draw_str(canvas, 2, 45, app->mifare.value);
     } else {
         canvas_draw_str(
             canvas,
             2,
-            39,
+            36,
             app->contactless_state == ContactlessStateScanEm ?
                 "Scanning EM..." :
                 "Scanning MIFARE...");
     }
 
-    canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(
-        canvas,
-        2,
-        63,
-        app->contactless_state == ContactlessStateScanEm ?
-            "EM window 1.2s" :
-            "MIFARE window 0.5s");
 }
 
 static void draw_radio(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 20, "RADIO");
-    elements_button_left(canvas, "Contact");
+    canvas_draw_str(canvas, 2, 18, "RADIO");
 
     if(!app->radio_ok) {
-        canvas_draw_str(canvas, 2, 39, "CC1101 RX start FAILED");
+        canvas_draw_str(canvas, 2, 34, "CC1101 RX start FAILED");
         return;
     }
 
     if(!app->have_radio) {
-        canvas_draw_str(canvas, 2, 39, "Listening RCO / Aptus...");
+        canvas_draw_str(canvas, 2, 34, "Listening RCO / Aptus...");
         return;
     }
 
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 37, credential_type_name(app->radio_credential.type));
+    canvas_draw_str(canvas, 2, 31, credential_type_name(app->radio_credential.type));
     canvas_set_font(canvas, FontBigNumbers);
-    canvas_draw_str(canvas, 2, 57, app->radio_credential.value);
+    canvas_draw_str(canvas, 2, 49, app->radio_credential.value);
 }
 
 static void draw_debug(Canvas* canvas, K2sApp* app) {
@@ -457,7 +480,7 @@ static void draw_debug(Canvas* canvas, K2sApp* app) {
             sizeof(line),
             "KeeLoq:%lu",
             (unsigned long)app->radio_status.native_keeloq_frames);
-        canvas_draw_str(canvas, 2, 53, line);
+        canvas_draw_str(canvas, 2, 49, line);
     } else {
         snprintf(
             line,
@@ -472,11 +495,10 @@ static void draw_debug(Canvas* canvas, K2sApp* app) {
             "EM:%s MF:%s",
             app->have_em ? "yes" : "no",
             app->have_mifare ? "yes" : "no");
-        canvas_draw_str(canvas, 2, 53, line);
+        canvas_draw_str(canvas, 2, 49, line);
     }
 
-    canvas_draw_str(canvas, 48, 63, "OK: normal");
-    elements_button_left(canvas, app->mode == K2sModeRadio ? "Contact" : "Radio");
+    canvas_draw_str(canvas, 2, 54, "OK: normal");
 }
 
 static void draw_cb(Canvas* canvas, void* context) {
@@ -493,6 +515,8 @@ static void draw_cb(Canvas* canvas, void* context) {
     } else {
         draw_contactless(canvas, app);
     }
+
+    draw_footer(canvas, app);
 }
 
 static void input_cb(InputEvent* event, void* context) {
@@ -513,6 +537,15 @@ int32_t k2s_credential_reader_app(void* p) {
     app->radio_status.rssi = -127.0f;
 
     app->feedback = credential_feedback_alloc();
+
+    /*
+     * HID keyboard output is ON by default. The previous USB configuration is
+     * saved by HidOutput and restored when HID is disabled or the app exits.
+     */
+    app->hid = hid_output_alloc();
+    if(app->hid) {
+        app->hid_enable_ok = hid_output_set_enabled(app->hid, true);
+    }
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();
@@ -543,6 +576,12 @@ int32_t k2s_credential_reader_app(void* p) {
                     } else {
                         start_radio(app);
                     }
+                } else if(event.key == InputKeyRight) {
+                    if(app->hid) {
+                        const bool next_enabled = !hid_output_is_enabled(app->hid);
+                        app->hid_enable_ok =
+                            hid_output_set_enabled(app->hid, next_enabled);
+                    }
                 }
             }
         }
@@ -569,6 +608,11 @@ int32_t k2s_credential_reader_app(void* p) {
 
     if(app->feedback) {
         credential_feedback_free(app->feedback);
+    }
+
+    if(app->hid) {
+        hid_output_free(app->hid);
+        app->hid = NULL;
     }
 
     memset(app, 0, sizeof(K2sApp));

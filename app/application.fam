@@ -8,5 +8,5 @@ App(
     fap_category="Tools",
     fap_author="K2S",
     fap_description="K2S combined credential reader RC6",
-    fap_version="0.6",
+    fap_version="0.7",
 )
