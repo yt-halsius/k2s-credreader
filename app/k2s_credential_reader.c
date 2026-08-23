@@ -1,5 +1,6 @@
 #include <furi.h>
 #include <gui/gui.h>
+#include <gui/elements.h>
 #include <gui/view_port.h>
 #include <input/input.h>
 
@@ -202,18 +203,13 @@ static void accept_em(K2sApp* app, const Credential* credential) {
     app->state_saw_credential = true;
     app->em_miss_windows = 0;
 
+    /*
+     * EM and MIFARE have independent duplicate state.
+     * A new EM must never invalidate or re-arm the current MIFARE value.
+     */
     if(!app->have_em || !credential_same(&app->em, credential)) {
         app->em = *credential;
         app->have_em = true;
-
-        /*
-         * A new EM begins a new contactless set. A MIFARE already cached from
-         * the previous set must be encountered again in the next NFC window.
-         */
-        app->have_mifare = false;
-        credential_clear(&app->mifare);
-        app->mifare_miss_windows = 0;
-
         credential_feedback_emit(app->feedback, &app->em);
     }
 }
@@ -264,6 +260,10 @@ static void update_em_scan(K2sApp* app) {
         if(!app->state_saw_credential && app->have_em) {
             if(app->em_miss_windows < UINT8_MAX) app->em_miss_windows++;
             if(app->em_miss_windows >= RELEASE_MISS_WINDOWS) {
+                /*
+                 * Re-arm EM only. MIFARE state is independent and remains
+                 * unchanged until MIFARE itself is released or changes.
+                 */
                 app->have_em = false;
                 credential_clear(&app->em);
                 app->em_miss_windows = 0;
@@ -298,6 +298,10 @@ static void update_mifare_scan(K2sApp* app) {
         if(!app->state_saw_credential && app->have_mifare) {
             if(app->mifare_miss_windows < UINT8_MAX) app->mifare_miss_windows++;
             if(app->mifare_miss_windows >= RELEASE_MISS_WINDOWS) {
+                /*
+                 * Re-arm MIFARE only. EM state is independent and remains
+                 * unchanged until EM itself is released or changes.
+                 */
                 app->have_mifare = false;
                 credential_clear(&app->mifare);
                 app->mifare_miss_windows = 0;
@@ -361,7 +365,8 @@ static void update_radio(K2sApp* app) {
 
 static void draw_contactless(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 20, "CONTACTLESS   LEFT: Radio");
+    canvas_draw_str(canvas, 2, 20, "CONTACTLESS");
+    elements_button_left(canvas, "Radio");
 
     if(!app->lf_ok && app->contactless_state == ContactlessStateScanEm) {
         canvas_draw_str(canvas, 2, 37, "EM reader start FAILED");
@@ -408,7 +413,8 @@ static void draw_contactless(Canvas* canvas, K2sApp* app) {
 
 static void draw_radio(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 20, "RADIO         LEFT: Contactless");
+    canvas_draw_str(canvas, 2, 20, "RADIO");
+    elements_button_left(canvas, "Contact");
 
     if(!app->radio_ok) {
         canvas_draw_str(canvas, 2, 39, "CC1101 RX start FAILED");
@@ -469,7 +475,8 @@ static void draw_debug(Canvas* canvas, K2sApp* app) {
         canvas_draw_str(canvas, 2, 53, line);
     }
 
-    canvas_draw_str(canvas, 2, 64, "OK normal  LEFT mode");
+    canvas_draw_str(canvas, 48, 63, "OK: normal");
+    elements_button_left(canvas, app->mode == K2sModeRadio ? "Contact" : "Radio");
 }
 
 static void draw_cb(Canvas* canvas, void* context) {

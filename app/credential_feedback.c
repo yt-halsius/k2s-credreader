@@ -48,25 +48,36 @@ static const NotificationMessage message_morse_gap = {
     },
 };
 
+static const NotificationMessage message_morse_character_gap = {
+    .type = NotificationMessageTypeDelay,
+    .data.delay = {
+        .length = MORSE_DOT_MS * 3U,
+    },
+};
+
 static const NotificationSequence sequence_morse_r = {
     &message_morse_tone, &message_morse_dot, &message_sound_off, &message_morse_gap,
     &message_morse_tone, &message_morse_dash, &message_sound_off, &message_morse_gap,
-    &message_morse_tone, &message_morse_dot, &message_sound_off, NULL,
+    &message_morse_tone, &message_morse_dot, &message_sound_off,
+    &message_morse_character_gap, NULL,
 };
 
 static const NotificationSequence sequence_morse_a = {
     &message_morse_tone, &message_morse_dot, &message_sound_off, &message_morse_gap,
-    &message_morse_tone, &message_morse_dash, &message_sound_off, NULL,
+    &message_morse_tone, &message_morse_dash, &message_sound_off,
+    &message_morse_character_gap, NULL,
 };
 
 /* Reserved for the upcoming MIFARE and EM adapters. */
 static const NotificationSequence sequence_morse_m = {
     &message_morse_tone, &message_morse_dash, &message_sound_off, &message_morse_gap,
-    &message_morse_tone, &message_morse_dash, &message_sound_off, NULL,
+    &message_morse_tone, &message_morse_dash, &message_sound_off,
+    &message_morse_character_gap, NULL,
 };
 
 static const NotificationSequence sequence_morse_e = {
-    &message_morse_tone, &message_morse_dot, &message_sound_off, NULL,
+    &message_morse_tone, &message_morse_dot, &message_sound_off,
+    &message_morse_character_gap, NULL,
 };
 
 struct CredentialFeedback {

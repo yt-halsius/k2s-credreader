@@ -113,3 +113,13 @@ make -C tests test
 ```
 
 CI also builds the FAP against a deliberately pinned Momentum revision.
+
+
+## v0.6.1 UI/feedback refinement
+
+- Mode switching is shown with Flipper's native bottom-left button hint instead
+  of inline `LEFT:` text.
+- Morse letters now include the standard 3-unit inter-character silence.
+  This matters especially in contactless mode where EM (`E`) can be followed
+  immediately by MIFARE (`M`); without a character gap the two acknowledgements
+  can perceptually run together even though the element timing is correct.
