@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  # Keep this in sync with ci.yml.
+  MOMENTUM_REF: 8ed809f
+  MOMENTUM_REPO: https://github.com/Next-Flip/Momentum-Firmware.git
+
+jobs:
+  release:
+    name: Build and publish FAP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged K2S source
+        uses: actions/checkout@v5
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Run host regression tests
+        run: make -C tests test
+
+      - name: Clone pinned Momentum
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive "$MOMENTUM_REPO" momentum
+          cd momentum
+          git checkout "$MOMENTUM_REF"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: Install K2S app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p momentum/applications_user/k2s_credential_reader_flipper
+          cp -a app/. momentum/applications_user/k2s_credential_reader_flipper/
+
+      - name: Build Momentum FAP
+        working-directory: momentum
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fbt build APPSRC=applications_user/k2s_credential_reader_flipper
+
+      - name: Package release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          FAP_SOURCE="momentum/build/f7-firmware-C/.extapps/k2s_credential_reader.fap"
+          FAP_RELEASE="dist/k2s_credential_reader-${GITHUB_REF_NAME}.fap"
+
+          test -f "$FAP_SOURCE"
+          cp "$FAP_SOURCE" "$FAP_RELEASE"
+
+          (
+            cd dist
+            sha256sum "k2s_credential_reader-${GITHUB_REF_NAME}.fap" \
+              > "k2s_credential_reader-${GITHUB_REF_NAME}.fap.sha256"
+          )
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/k2s_credential_reader-${{ github.ref_name }}.fap
+            dist/k2s_credential_reader-${{ github.ref_name }}.fap.sha256
