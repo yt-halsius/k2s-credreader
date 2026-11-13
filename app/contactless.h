@@ -13,6 +13,12 @@ bool contactless_decode_em4100(
     const uint8_t data[K2S_EM4100_DATA_LEN],
     Credential* out);
 
+bool contactless_decode_mifare_uid_order(
+    const uint8_t* uid,
+    size_t uid_len,
+    bool lsb_first,
+    Credential* out);
+
 bool contactless_decode_mifare_uid(
     const uint8_t* uid,
     size_t uid_len,

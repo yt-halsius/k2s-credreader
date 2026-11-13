@@ -22,22 +22,35 @@ bool contactless_decode_em4100(
     return credential_set(out, CredentialTypeEm, value, 0U);
 }
 
+bool contactless_decode_mifare_uid_order(
+    const uint8_t* uid,
+    size_t uid_len,
+    bool lsb_first,
+    Credential* out) {
+    if(!uid || !out || uid_len != K2S_MIFARE_UID_LEN) return false;
+
+    char value[11] = {0};
+    size_t offset = 0U;
+    static const char hex[] = "0123456789ABCDEF";
+
+    value[offset++] = '0';
+    value[offset++] = '0';
+
+    for(size_t i = 0; i < K2S_MIFARE_UID_LEN; ++i) {
+        const size_t index =
+            lsb_first ? (K2S_MIFARE_UID_LEN - 1U - i) : i;
+        const uint8_t byte = uid[index];
+        value[offset++] = hex[(byte >> 4) & 0x0FU];
+        value[offset++] = hex[byte & 0x0FU];
+    }
+
+    value[offset] = '\0';
+    return credential_set(out, CredentialTypeMifare, value, 0U);
+}
+
 bool contactless_decode_mifare_uid(
     const uint8_t* uid,
     size_t uid_len,
     Credential* out) {
-    if(!uid || !out || uid_len != K2S_MIFARE_UID_LEN) return false;
-
-    char value[11];
-    const int written = snprintf(
-        value,
-        sizeof(value),
-        "00%02X%02X%02X%02X",
-        uid[0],
-        uid[1],
-        uid[2],
-        uid[3]);
-
-    if(written != 10) return false;
-    return credential_set(out, CredentialTypeMifare, value, 0U);
+    return contactless_decode_mifare_uid_order(uid, uid_len, false, out);
 }

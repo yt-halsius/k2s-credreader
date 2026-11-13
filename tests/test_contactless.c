@@ -32,6 +32,26 @@ int main(void) {
     require(!contactless_decode_mifare_uid(mifare, 3U, &credential), "reject short UID");
     require(!contactless_decode_em4100(NULL, &credential), "reject null EM");
 
+
+    {
+        const uint8_t uid[4] = {0x12, 0x34, 0x56, 0x78};
+        Credential c = {0};
+
+        if(!contactless_decode_mifare_uid_order(uid, sizeof(uid), false, &c) ||
+           strcmp(c.value, "0012345678") != 0) {
+            fprintf(stderr, "FAIL: MSB MIFARE formatting\n");
+            return EXIT_FAILURE;
+        }
+
+        credential_clear(&c);
+
+        if(!contactless_decode_mifare_uid_order(uid, sizeof(uid), true, &c) ||
+           strcmp(c.value, "0078563412") != 0) {
+            fprintf(stderr, "FAIL: LSB MIFARE formatting\n");
+            return EXIT_FAILURE;
+        }
+    }
+
     puts("All EM/MIFARE normalization tests passed.");
     return EXIT_SUCCESS;
 }

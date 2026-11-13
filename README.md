@@ -147,3 +147,17 @@ Press **Right** to toggle HID. The native-style bottom-right flag shows
 
 The app remembers the USB configuration that was active before K2S started.
 Turning HID off, or exiting K2S, restores that previous USB configuration.
+
+
+## MIFARE UID byte order
+
+MIFARE 4-byte UID output defaults to LSB-first and can be toggled with OK.
+
+For UID `12 34 56 78`:
+
+```text
+LSB: 0078563412
+MSB: 0012345678
+```
+
+The selection affects both display and USB HID output.

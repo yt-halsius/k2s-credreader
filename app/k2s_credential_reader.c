@@ -42,6 +42,7 @@ typedef struct {
     CredentialFeedback* feedback;
     HidOutput* hid;
     bool hid_enable_ok;
+    bool mifare_lsb_first;
 
     K2sMode mode;
     ContactlessState contactless_state;
@@ -83,6 +84,24 @@ static bool credential_same(const Credential* a, const Credential* b) {
     return a->type == b->type &&
            a->button == b->button &&
            strcmp(a->value, b->value) == 0;
+}
+
+static void reverse_current_mifare_value(K2sApp* app) {
+    if(!app || !app->have_mifare) return;
+
+    const char* src = app->mifare.value;
+    if(strlen(src) != 10U || src[0] != '0' || src[1] != '0') return;
+
+    char reversed[11] = {
+        '0', '0',
+        src[8], src[9],
+        src[6], src[7],
+        src[4], src[5],
+        src[2], src[3],
+        '\0',
+    };
+
+    memcpy(app->mifare.value, reversed, sizeof(reversed));
 }
 
 static void output_credential(K2sApp* app, const Credential* credential) {
@@ -297,9 +316,10 @@ static void update_mifare_scan(K2sApp* app) {
         app->last_nfc_sequence = app->nfc_status.sequence;
 
         Credential credential = {0};
-        if(contactless_decode_mifare_uid(
+        if(contactless_decode_mifare_uid_order(
                app->nfc_status.uid,
                app->nfc_status.uid_len,
+               app->mifare_lsb_first,
                &credential)) {
             accept_mifare(app, &credential);
         }
@@ -391,9 +411,13 @@ static void draw_footer(Canvas* canvas, K2sApp* app) {
         canvas,
         app->mode == K2sModeRadio ? "Contact" : "Radio");
 
+    elements_button_center(
+        canvas,
+        app->mifare_lsb_first ? "MSB" : "LSB");
+
     elements_button_right(
         canvas,
-        (app->hid && hid_output_is_enabled(app->hid)) ? "HID ON" : "HID OFF");
+        (app->hid && hid_output_is_enabled(app->hid)) ? "HID OFF" : "HID ON");
 }
 
 static void draw_contactless(Canvas* canvas, K2sApp* app) {
@@ -498,7 +522,7 @@ static void draw_debug(Canvas* canvas, K2sApp* app) {
         canvas_draw_str(canvas, 2, 49, line);
     }
 
-    canvas_draw_str(canvas, 2, 54, "OK: normal");
+    canvas_draw_str(canvas, 2, 54, app->mifare_lsb_first ? "UID:LSB  UP normal" : "UID:MSB  UP normal");
 }
 
 static void draw_cb(Canvas* canvas, void* context) {
@@ -535,6 +559,7 @@ int32_t k2s_credential_reader_app(void* p) {
     credential_clear(&app->mifare);
     credential_clear(&app->radio_credential);
     app->radio_status.rssi = -127.0f;
+    app->mifare_lsb_first = true;
 
     app->feedback = credential_feedback_alloc();
 
@@ -569,6 +594,9 @@ int32_t k2s_credential_reader_app(void* p) {
                 if(event.key == InputKeyBack) {
                     running = false;
                 } else if(event.key == InputKeyOk) {
+                    app->mifare_lsb_first = !app->mifare_lsb_first;
+                    reverse_current_mifare_value(app);
+                } else if(event.key == InputKeyUp) {
                     app->debug = !app->debug;
                 } else if(event.key == InputKeyLeft) {
                     if(app->mode == K2sModeRadio) {
