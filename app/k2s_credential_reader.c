@@ -1,4 +1,5 @@
 #include <furi.h>
+#include <assets_icons.h>
 #include <gui/gui.h>
 #include <gui/elements.h>
 #include <gui/view_port.h>
@@ -396,14 +397,73 @@ static void update_radio(K2sApp* app) {
     }
 }
 
+static void draw_center_action_button(Canvas* canvas, const char* label, int32_t x_shift) {
+    /*
+     * Native elements_button_center() is exactly centered. With three footer
+     * controls the center MSB/LSB button lands immediately next to HID OFF.
+     * Draw the same native geometry a few pixels left to create visual air.
+     */
+    const size_t button_height = 12U;
+    const size_t vertical_offset = 3U;
+    const size_t horizontal_offset = 1U;
+    const size_t icon_width = 7U;
+    const size_t icon_height = 7U;
+    const size_t icon_h_offset = 3U;
+    const size_t icon_width_with_offset = icon_width + icon_h_offset;
+    const size_t string_width = canvas_string_width(canvas, label);
+    const size_t button_width =
+        string_width + horizontal_offset * 2U + icon_width_with_offset;
+
+    const int32_t x =
+        ((int32_t)canvas_width(canvas) - (int32_t)button_width) / 2 + x_shift;
+    const int32_t y = (int32_t)canvas_height(canvas);
+
+    canvas_draw_box(canvas, x, y - (int32_t)button_height, button_width, button_height);
+
+    canvas_draw_line(
+        canvas, x - 1, y, x - 1, y - (int32_t)button_height);
+    canvas_draw_line(
+        canvas, x - 2, y, x - 2, y - (int32_t)button_height + 1);
+    canvas_draw_line(
+        canvas, x - 3, y, x - 3, y - (int32_t)button_height + 2);
+
+    canvas_draw_line(
+        canvas,
+        x + (int32_t)button_width,
+        y,
+        x + (int32_t)button_width,
+        y - (int32_t)button_height);
+    canvas_draw_line(
+        canvas,
+        x + (int32_t)button_width + 1,
+        y,
+        x + (int32_t)button_width + 1,
+        y - (int32_t)button_height + 1);
+    canvas_draw_line(
+        canvas,
+        x + (int32_t)button_width + 2,
+        y,
+        x + (int32_t)button_width + 2,
+        y - (int32_t)button_height + 2);
+
+    canvas_invert_color(canvas);
+    canvas_draw_icon(
+        canvas,
+        x + (int32_t)horizontal_offset,
+        y - (int32_t)(icon_height + vertical_offset),
+        &I_ButtonCenter_7x7);
+    canvas_draw_str(
+        canvas,
+        x + (int32_t)horizontal_offset + (int32_t)icon_width_with_offset,
+        y - (int32_t)vertical_offset,
+        label);
+    canvas_invert_color(canvas);
+}
+
 static void draw_footer(Canvas* canvas, K2sApp* app) {
     /*
      * Reserve the bottom native button-label area exclusively for controls.
-     *
-     * Important: drawing functions above may leave Canvas in FontPrimary or
-     * FontBigNumbers. elements_button_* uses the current Canvas font for its
-     * label, so explicitly restore FontSecondary here before drawing the
-     * native-style footer buttons.
+     * Button text describes the action.
      */
     canvas_set_font(canvas, FontSecondary);
 
@@ -411,9 +471,16 @@ static void draw_footer(Canvas* canvas, K2sApp* app) {
         canvas,
         app->mode == K2sModeRadio ? "Contact" : "Radio");
 
-    elements_button_center(
-        canvas,
-        app->mifare_lsb_first ? "MSB" : "LSB");
+    /*
+     * MIFARE byte order only applies in Contactless mode.
+     * LSB is the default, so the action offered at startup is MSB.
+     */
+    if(app->mode == K2sModeContactless) {
+        draw_center_action_button(
+            canvas,
+            app->mifare_lsb_first ? "MSB" : "LSB",
+            -4);
+    }
 
     elements_button_right(
         canvas,
@@ -422,7 +489,7 @@ static void draw_footer(Canvas* canvas, K2sApp* app) {
 
 static void draw_contactless(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 18, "CONTACTLESS");
+    canvas_draw_str(canvas, 2, 22, "CONTACTLESS");
 
     if(!app->lf_ok && app->contactless_state == ContactlessStateScanEm) {
         canvas_draw_str(canvas, 2, 37, "EM reader start FAILED");
@@ -461,7 +528,7 @@ static void draw_contactless(Canvas* canvas, K2sApp* app) {
 
 static void draw_radio(Canvas* canvas, K2sApp* app) {
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 18, "RADIO");
+    canvas_draw_str(canvas, 2, 22, "RADIO");
 
     if(!app->radio_ok) {
         canvas_draw_str(canvas, 2, 34, "CC1101 RX start FAILED");
