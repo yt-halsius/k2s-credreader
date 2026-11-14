@@ -1,9 +1,14 @@
 name: CI
 
 on:
+  # Normal development CI. Defining branches here intentionally excludes tags.
+  # Release tags call this workflow explicitly from release.yml.
   push:
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

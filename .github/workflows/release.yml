@@ -5,18 +5,25 @@ on:
     tags:
       - "v*.*.*"
 
+# The release workflow is triggered only by a version tag.
+# CI is called as a reusable workflow and must succeed before publish can run.
 permissions:
-  contents: write
-
-env:
-  # Keep this in sync with ci.yml.
-  MOMENTUM_REF: 8ed809f
-  MOMENTUM_REPO: https://github.com/Next-Flip/Momentum-Firmware.git
+  contents: read
 
 jobs:
+  ci:
+    name: CI release gate
+    uses: ./.github/workflows/ci.yml
+
   release:
-    name: Build and publish FAP
+    name: Attest and publish FAP
+    needs: ci
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout tagged K2S source
@@ -31,51 +38,33 @@ jobs:
             exit 1
           fi
 
-      - name: Run host regression tests
-        run: make -C tests test
-
-      - name: Clone pinned Momentum
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --recursive "$MOMENTUM_REPO" momentum
-          cd momentum
-          git checkout "$MOMENTUM_REF"
-          git submodule sync --recursive
-          git submodule update --init --recursive
-
-      - name: Install K2S app
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p momentum/applications_user/k2s_credential_reader_flipper
-          cp -a app/. momentum/applications_user/k2s_credential_reader_flipper/
-
-      - name: Build Momentum FAP
-        working-directory: momentum
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./fbt build APPSRC=applications_user/k2s_credential_reader_flipper
+      - name: Download CI-built FAP
+        uses: actions/download-artifact@v6
+        with:
+          name: k2s-credential-reader-fap
+          path: dist
 
       - name: Package release asset
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p dist
-
-          FAP_SOURCE="momentum/build/f7-firmware-C/.extapps/k2s_credential_reader.fap"
+          FAP_SOURCE="dist/k2s_credential_reader.fap"
           FAP_RELEASE="dist/k2s_credential_reader-${GITHUB_REF_NAME}.fap"
 
           test -f "$FAP_SOURCE"
-          cp "$FAP_SOURCE" "$FAP_RELEASE"
+          mv "$FAP_SOURCE" "$FAP_RELEASE"
 
           (
             cd dist
             sha256sum "k2s_credential_reader-${GITHUB_REF_NAME}.fap" \
               > "k2s_credential_reader-${GITHUB_REF_NAME}.fap.sha256"
           )
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/k2s_credential_reader-${{ github.ref_name }}.fap
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
