@@ -13,3 +13,10 @@ dist/
 .idea/
 .DS_Store
 *~
+
+# Host-side test binaries
+/tests/test_aptus
+/tests/test_aptus_keeloq_decoder
+/tests/test_contactless
+/tests/test_contactless_events
+/tests/test_rco_leb
